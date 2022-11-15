@@ -1,24 +1,140 @@
 #!/usr/bin/env ruby
 
-require 'yaml'
 require 'getoptlong'
+require 'set'
+require 'uri'
+require 'yaml'
 
-inf = nil
+$always_color = false
+def putf(s)
+  s = s.gsub(/\e\[[\d;]*m/, '') unless $always_color || $stdout.tty?
+  $stdout << s << "\n"
+end
+
+in_f = nil
+config_f = nil
 
 GetoptLong.new(
   ['--in', '-i', GetoptLong::REQUIRED_ARGUMENT],
+  ['--config', '-c', GetoptLong::REQUIRED_ARGUMENT],
+  ['--color', '-C', GetoptLong::NO_ARGUMENT],
 ).each do |opt, arg|
   case opt
-  when '--in'; inf = arg
+  when '--in'; in_f = arg
+  when '--config'; config_f = arg
+  when '--color'; $always_color = true
   end
 end
 
-raise 'Missing input file' if inf.nil?
+raise 'Missing input file' if in_f.nil?
+raise 'Missing configuraiton file' if config_f.nil?
 
-yaml = YAML.load(File.read(inf))
+yaml = YAML.load(File.read(in_f))
+config = YAML.load(File.read(config_f))
 
-yaml.each do |(k, v)|
-  next unless v.nil?
+triage_order = [
+  false,
+  *config['triage'].keys.reverse.map{|s| s.to_sym },
+]
+triage_prio = triage_order.each_with_index.to_h
+triage_map = config['triage'].each_pair.flat_map{|(k, v)| [*v].map{|v| [v, k.to_sym] } }.to_h
 
-  puts "Missing URL for: #{k}"
+triage_extra_map = config['extra'].map do |uri, triage|
+  triage = triage.to_sym
+
+  raise "Invalid triage level #{triage.inspect} for #{uri.inspect}" unless triage_prio.include?(triage)
+
+  [URI(uri), triage]
+end.to_h
+
+# Users categorized by level-2 domain names
+l2dns = {}
+
+# L2 domain names by user
+user_l2dns = {}
+
+# Highest-priority triage tag for each user
+user_best_triage = {}
+
+put_l2dn = lambda do |uri: nil, username:|
+  if uri then
+    dn = uri.host.split('.')[-2..].reverse.join('.')
+    triage = triage_map.fetch(dn) { triage_extra_map.fetch(uri, false) }
+  else
+    dn = nil
+    triage = nil
+  end
+
+  l2dns.fetch(dn) { l2dns[dn] = Set.new } << { user: username, link: uri, triage: triage }
+  user_l2dns.fetch(username) { user_l2dns[username] = Set.new } << dn
+
+  last_triage = user_best_triage[username]
+  user_best_triage[username] = triage if last_triage.nil? || triage_prio[triage] >= triage_prio[last_triage]
+end
+
+yaml.each do |(user, links)|
+  links = [*links]
+
+  put_l2dn.(uri: nil, username: user) if links.empty?
+
+  links.each do |link|
+    uri = begin
+      URI(link)
+    rescue => e
+      putf "Error parsing #{link} for #{user}:"
+      p e
+      put_l2dn(:err, user)
+      next
+    end
+
+    put_l2dn.(uri: uri, username: user)
+  end
+end
+
+if l2dns.include?(:err)
+  raise "One or more links was invalid"
+end
+
+if !l2dns.fetch(nil) { [] }.empty?
+  putf "\e[1mMissing:\e[m"
+
+  l2dns[nil].each do |info|
+    putf "  \e[38;5;0m- \e[38;5;3m#{info[:user]}\e[m"
+  end
+end
+
+triage_order.each do |triage|
+  map = l2dns
+    .map{|(k, v)| [k, v.filter{|i| user_best_triage[i[:user]] == triage }] }
+    .filter{|(k, v)| !v.empty? }
+    .sort do |(a, _), (b, _)|
+      next a.nil? ? -1 : 1 if a.nil? != b.nil?
+
+      a <=> b
+    end
+
+  next if map.empty?
+
+  case triage
+  when false; putf "\e[1;38;5;1mUnknown level:\e[m"
+  else putf "\e[1mLevel \e[38;5;6m'#{triage}'\e[39m:\e[m"
+  end
+
+  map.each do |dn, infos|
+    putf "  \e[38;5;0m- \e[38;5;3m#{dn}\e[39m:\e[m"
+
+    infos.each do |info|
+      s = "    \e[38;5;0m- \e[38;5;2m#{info[:user]}"
+
+      if info[:triage] != triage
+        s << case info[:triage]
+        when false; " \e[38;5;1m(unknown)"
+        else " \e[38;5;3m(#{info[:triage]})"
+        end
+      end
+      s << " \e[38;5;8m(#{info[:link]})\e[m"
+
+      putf s
+    end
+  end
 end
