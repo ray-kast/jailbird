@@ -1,0 +1,24 @@
+{
+  "name": "jailbird",
+  "version": "0.0.1",
+  "description": "Break free.  Or something, idk.",
+  "main": "index.ts",
+  "scripts": {
+    "build": "ts-node build.ts",
+    "main": "pnpm build && node dist/index.js"
+  },
+  "author": "raykast <me@ryan-s.net>",
+  "license": "AGPL-3.0-or-later",
+  "dependencies": {
+    "commander": "^9.4.1",
+    "dotenv": "^16.0.3",
+    "esbuild": "^0.15.14",
+    "twitter-api-sdk": "^1.2.1"
+  },
+  "devDependencies": {
+    "@types/node": "^18.11.9",
+    "prettier": "^2.7.1",
+    "ts-node": "^10.9.1",
+    "typescript": "^4.9.3"
+  }
+}

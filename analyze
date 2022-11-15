@@ -1,0 +1,24 @@
+#!/usr/bin/env ruby
+
+require 'yaml'
+require 'getoptlong'
+
+inf = nil
+
+GetoptLong.new(
+  ['--in', '-i', GetoptLong::REQUIRED_ARGUMENT],
+).each do |opt, arg|
+  case opt
+  when '--in'; inf = arg
+  end
+end
+
+raise 'Missing input file' if inf.nil?
+
+yaml = YAML.load(File.read(inf))
+
+yaml.each do |(k, v)|
+  next unless v.nil?
+
+  puts "Missing URL for: #{k}"
+end
