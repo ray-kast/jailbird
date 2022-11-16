@@ -11,8 +11,8 @@ def putf(s)
   $stdout << s << "\n"
 end
 
-in_f = nil
-config_f = nil
+in_files = []
+config_file = nil
 
 GetoptLong.new(
   ['--in', '-i', GetoptLong::REQUIRED_ARGUMENT],
@@ -20,17 +20,19 @@ GetoptLong.new(
   ['--color', '-C', GetoptLong::NO_ARGUMENT],
 ).each do |opt, arg|
   case opt
-  when '--in'; in_f = arg
-  when '--config'; config_f = arg
+  when '--in'; in_files << arg
+  when '--config'; config_file = arg
   when '--color'; $always_color = true
   end
 end
 
-raise 'Missing input file' if in_f.nil?
-raise 'Missing configuraiton file' if config_f.nil?
+raise 'Missing input file' if in_files.empty?
+raise 'Missing configuraiton file' if config_file.nil?
 
-yaml = YAML.load(File.read(in_f))
-config = YAML.load(File.read(config_f))
+yamls = in_files.map{|f| File.open(f) {|i| YAML.load(i) } }
+config = File.open(config_file) {|i| YAML.load(i) }
+
+yaml = yamls.lazy.flat_map{|y| y.each_pair.lazy }.to_h
 
 triage_order = [
   false,
@@ -42,10 +44,16 @@ triage_map = config['triage'].each_pair.flat_map{|(k, v)| [*v].map{|v| [v, k.to_
 triage_extra_map = config['extra'].map do |uri, triage|
   triage = triage.to_sym
 
-  raise "Invalid triage level #{triage.inspect} for #{uri.inspect}" unless triage_prio.include?(triage)
+  unless triage_prio.include?(triage)
+    raise "Invalid triage level #{triage.inspect} for #{uri.inspect}"
+  end
 
   [URI(uri), triage]
 end.to_h
+
+ignore_users = Set[*config['ignore']]
+
+known_missing_users = Set[*config['known-missing']]
 
 # Users categorized by level-2 domain names
 l2dns = {}
@@ -56,9 +64,11 @@ user_l2dns = {}
 # Highest-priority triage tag for each user
 user_best_triage = {}
 
+def username(user) URI(user).path.sub(/^\//, '') end
+
 put_l2dn = lambda do |uri: nil, username:|
   if uri then
-    dn = uri.host.split('.')[-2..].reverse.join('.')
+    dn = uri.host.split('.')[-2..]&.reverse&.join('.')
     triage = triage_map.fetch(dn) { triage_extra_map.fetch(uri, false) }
   else
     dn = nil
@@ -69,10 +79,14 @@ put_l2dn = lambda do |uri: nil, username:|
   user_l2dns.fetch(username) { user_l2dns[username] = Set.new } << dn
 
   last_triage = user_best_triage[username]
-  user_best_triage[username] = triage if last_triage.nil? || triage_prio[triage] >= triage_prio[last_triage]
+  if last_triage.nil? || triage_prio[triage] >= triage_prio[last_triage]
+    user_best_triage[username] = triage
+  end
 end
 
 yaml.each do |(user, links)|
+  next if ignore_users.include?(username(user))
+
   links = [*links]
 
   put_l2dn.(uri: nil, username: user) if links.empty?
@@ -96,17 +110,32 @@ if l2dns.include?(:err)
 end
 
 if !l2dns.fetch(nil) { [] }.empty?
-  putf "\e[1mMissing:\e[m"
+  (known, unknown) = l2dns[nil]
+    .filter{|i| i[:link].nil? }
+    .sort_by{|i| i[:user].downcase }
+    .partition{|i| known_missing_users.include?(username(i[:user])) }
 
-  l2dns[nil].each do |info|
-    putf "  \e[38;5;0m- \e[38;5;3m#{info[:user]}\e[m"
+  [["Missing", unknown], ["Known missing", known]].each do |(title, list)|
+    next if list.empty?
+
+    putf "\e[1m#{title} (#{list.size}):\e[m"
+
+    list.each do |info|
+      putf "  \e[38;5;0m- \e[38;5;3m#{info[:user]}\e[m"
+    end
   end
 end
 
 triage_order.each do |triage|
   map = l2dns
-    .map{|(k, v)| [k, v.filter{|i| user_best_triage[i[:user]] == triage }] }
-    .filter{|(k, v)| !v.empty? }
+    .map do |(k, v)|
+      [
+        k,
+        v.filter{|i| user_best_triage[i[:user]] == triage }
+          .sort_by{|i| i[:user].downcase }
+      ]
+    end
+    .filter{|(_, v)| !v.empty? }
     .sort do |(a, _), (b, _)|
       next a.nil? ? -1 : 1 if a.nil? != b.nil?
 
@@ -115,13 +144,23 @@ triage_order.each do |triage|
 
   next if map.empty?
 
+  len = map.map{|(_, v)| v.size }.sum
+
   case triage
-  when false; putf "\e[1;38;5;1mUnknown level:\e[m"
-  else putf "\e[1mLevel \e[38;5;6m'#{triage}'\e[39m:\e[m"
+  when false; putf "\e[1;38;5;1mUnknown level (#{len}):\e[m"
+  else putf "\e[1mLevel \e[38;5;6m'#{triage}' \e[39m(#{len}):\e[m"
   end
 
   map.each do |dn, infos|
-    putf "  \e[38;5;0m- \e[38;5;3m#{dn}\e[39m:\e[m"
+    s = "  \e[38;5;0m- "
+
+    s << case dn
+    when nil; "\e[1;38;5;1m<invalid>"
+    else "\e[38;5;3m#{dn}"
+    end
+    s << "\e[39m:\e[m"
+
+    putf s
 
     infos.each do |info|
       s = "    \e[38;5;0m- \e[38;5;2m#{info[:user]}"
